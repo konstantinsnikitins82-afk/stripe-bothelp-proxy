@@ -91,7 +91,7 @@ const bothelpUrl = process.env.BOTHELP_WEBHOOK_URL;
 
 app.get('/health', (_req, res) => res.status(200).send('OK'));
 
-app.post('/stripe/webhook', (req, res) => {
+app.post('/stripe/webhook', async (req, res) => {
   let event;
   try {
     const sig = req.headers['stripe-signature'];
