@@ -17,15 +17,16 @@ async function getBothelpToken() {
   const now = Date.now();
   if (bothelpToken && now < bothelpTokenExp - 60_000) return bothelpToken;
 
-  const resp = await fetch(`${BOTHELP_API_BASE}/openapi/oauth/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      client_id: BOTHELP_CLIENT_ID,
-      client_secret: BOTHELP_CLIENT_SECRET,
-      grant_type: 'client_credentials'
-    })
-  });
+  const params = new URLSearchParams();
+params.append('client_id', BOTHELP_CLIENT_ID);
+params.append('client_secret', BOTHELP_CLIENT_SECRET);
+params.append('grant_type', 'client_credentials');
+
+const resp = await fetch(`${BOTHELP_API_BASE}/oauth/token`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  body: params
+});
   if (!resp.ok) {
     console.error('BotHelp token error:', await resp.text());
     throw new Error('Cannot get BotHelp token');
