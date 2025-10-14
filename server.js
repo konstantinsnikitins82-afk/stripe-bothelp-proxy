@@ -87,7 +87,7 @@ app.use(bodyParser.json());
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-const bothelpUrl = process.env.BOTHELP_WEBHOOK_URL;
+// const bothelpUrl = process.env.BOTHELP_WEBHOOK_URL;
 
 app.get('/health', (_req, res) => res.status(200).send('OK'));
 
@@ -158,15 +158,15 @@ switch (event.type) {
 }
 
 
-  if (bothelpUrl) {
-    fetch(bothelpUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(event)
-    })
-    .then(r => console.log('→ Forwarded to BotHelp:', r.status))
-    .catch(e => console.error('→ BotHelp forward error:', e));
-  }
+  //if (bothelpUrl) {
+    //fetch(bothelpUrl, {
+     // method: 'POST',
+     //headers: { 'Content-Type': 'application/json' },
+     // body: JSON.stringify(event)
+   // })
+   // .then(r => console.log('→ Forwarded to BotHelp:', r.status))
+   // .catch(e => console.error('→ BotHelp forward error:', e));
+//  }
 
   res.json({ received: true });
 });
