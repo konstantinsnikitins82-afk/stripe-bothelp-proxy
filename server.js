@@ -82,7 +82,7 @@ async function setBothelpTag({ subscriberId, tag, action }) {
 
 const app = express();
 
-app.use('/stripe/webhook', bodyParser.raw({ type: 'application/json' }));
+app.use('/webhook', bodyParser.raw({ type: 'application/json' }));
 app.use(bodyParser.json());
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -91,7 +91,7 @@ const bothelpUrl = process.env.BOTHELP_WEBHOOK_URL;
 
 app.get('/health', (_req, res) => res.status(200).send('OK'));
 
-app.post('/stripe/webhook', async (req, res) => {
+app.post('/webhook', async (req, res) => {
   let event;
   try {
     const sig = req.headers['stripe-signature'];
