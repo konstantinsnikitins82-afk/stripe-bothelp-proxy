@@ -103,6 +103,61 @@ app.post('/stripe/webhook', (req, res) => {
 
   console.log('✅ Stripe event:', event.type);
 
+  // === Обработка событий Stripe ===
+switch (event.type) {
+  case 'checkout.session.completed': {
+    const s = event.data.object;
+    const email = s?.customer_details?.email || s?.customer_email;
+    console.log('checkout.session.completed email=', email);
+
+    if (email) {
+      const subId = await findSubscriberByEmail(email);
+      if (subId) {
+        await setBothelpTag({ subscriberId: subId, tag: BOTHELP_TAG, action: 'add' });
+      } else {
+        console.warn('BotHelp subscriber not found by email:', email);
+      }
+    }
+    break;
+  }
+
+  case 'invoice.payment_succeeded': {
+    const inv = event.data.object;
+    const email = inv?.customer_email || inv?.customer_details?.email;
+    console.log('invoice.payment_succeeded email=', email);
+    if (email) {
+      const subId = await findSubscriberByEmail(email);
+      if (subId) {
+        await setBothelpTag({ subscriberId: subId, tag: BOTHELP_TAG, action: 'add' });
+      }
+    }
+    break;
+  }
+
+  case 'invoice.payment_failed':
+  case 'customer.subscription.deleted': {
+    const obj = event.data.object;
+    const email = obj?.customer_email || obj?.customer_details?.email;
+    console.log(`${event.type} email=`, email);
+    if (email) {
+      const subId = await findSubscriberByEmail(email);
+      if (subId) {
+        await setBothelpTag({ subscriberId: subId, tag: BOTHELP_TAG, action: 'remove' });
+      }
+    }
+    break;
+  }
+
+  case 'customer.subscription.trial_will_end': {
+    console.log('Trial will end soon');
+    break;
+  }
+
+  default:
+    console.log('Unhandled event:', event.type);
+}
+
+
   if (bothelpUrl) {
     fetch(bothelpUrl, {
       method: 'POST',
