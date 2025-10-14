@@ -4,7 +4,7 @@ import Stripe from 'stripe';
 import fetch from 'node-fetch';
 
 // ===== BotHelp config (ENV) =====
-const BOTHELP_API_BASE = process.env.BOTHELP_API_BASE || ' https://api.bothelp.io';
+const BOTHELP_API_BASE = process.env.BOTHELP_API_BASE || 'https://api.bothelp.io';
 const BOTHELP_CLIENT_ID = process.env.BOTHELP_CLIENT_ID;
 const BOTHELP_CLIENT_SECRET = process.env.BOTHELP_CLIENT_SECRET;
 const BOTHELP_TAG = process.env.BOTHELP_TAG || 'sub_active';
