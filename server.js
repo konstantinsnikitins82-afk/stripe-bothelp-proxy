@@ -1,25 +1,30 @@
-// server.js
+// server.js — Stripe ↔ BotHelp, привязка по Telegram ID (client_reference_id)
+
 import express from 'express';
 import bodyParser from 'body-parser';
 import Stripe from 'stripe';
 import fetch from 'node-fetch';
 
-/* ================= ENV ================= */
+// ─── ENV ──────────────────────────────────────────────────────────────────────
+// Stripe
 const STRIPE_SECRET_KEY      = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WEBHOOK_SECRET  = process.env.STRIPE_WEBHOOK_SECRET;
 
-// Хост OpenAPI без лишних префиксов:
+// BotHelp OpenAPI base: используем именно https://openapi.bothelp.io (без /api)
 const BOTHELP_API_BASE       = (process.env.BOTHELP_API_BASE || ' https://openapi.bothelp.io').trim();
 const BOTHELP_CLIENT_ID      = process.env.BOTHELP_CLIENT_ID;
 const BOTHELP_CLIENT_SECRET  = process.env.BOTHELP_CLIENT_SECRET;
 
-// Тег активной подписки в BotHelp
+// Тег, который ставим активным подписчикам в BotHelp
 const BOTHELP_TAG            = process.env.BOTHELP_TAG || 'sub_active';
 
-/* ================ Stripe ================ */
+// (опционально) старый форвард вебхука в BotHelp, если вдруг нужен
+const BOTHELP_WEBHOOK_URL    = process.env.BOTHELP_WEBHOOK_URL || null;
+
+// ─── Init SDKs ────────────────────────────────────────────────────────────────
 const stripe = new Stripe(STRIPE_SECRET_KEY);
 
-/* ===== BotHelp OAuth2 (client_credentials) ===== */
+// ─── BotHelp OAuth2 (client_credentials) ─────────────────────────────────────
 let bothelpToken = null;
 let bothelpTokenExp = 0;
 
@@ -27,16 +32,16 @@ async function getBothelpToken() {
   const now = Date.now();
   if (bothelpToken && now < bothelpTokenExp - 60_000) return bothelpToken;
 
-  const params = new URLSearchParams();
-  params.append('client_id', BOTHELP_CLIENT_ID);
-  params.append('client_secret', BOTHELP_CLIENT_SECRET);
-  params.append('grant_type', 'client_credentials');
+  // важный момент: OpenAPI ждёт x-www-form-urlencoded
+  const form = new URLSearchParams();
+  form.append('client_id', BOTHELP_CLIENT_ID);
+  form.append('client_secret', BOTHELP_CLIENT_SECRET);
+  form.append('grant_type', 'client_credentials');
 
-  // Важно: токен берём по /oauth/token на том же хосте
   const resp = await fetch(`${BOTHELP_API_BASE}/oauth/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params
+    body: form
   });
 
   if (!resp.ok) {
@@ -47,40 +52,42 @@ async function getBothelpToken() {
   const data = await resp.json();
   bothelpToken = data.access_token;
   bothelpTokenExp = Date.now() + (data.expires_in || 3600) * 1000;
-  console.log('✅ BotHelp token OK');
   return bothelpToken;
 }
 
-/* ===== Поиск подписчика по email ===== */
-async function findSubscriberByEmail(email) {
-  if (!email) return null;
+// ─── BotHelp: поиск подписчика по Telegram ID ────────────────────────────────
+async function findSubscriberByTelegramId(tgId) {
+  if (!tgId) return null;
+
   try {
     const token = await getBothelpToken();
-    // Важно: без /openapi в пути, т.к. уже на поддомене openapi.*
+
     const resp = await fetch(`${BOTHELP_API_BASE}/subscribers/search`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ email })
+      body: JSON.stringify({ telegram_id: String(tgId) })
     });
 
     if (!resp.ok) {
       console.error('BotHelp search error:', resp.status, await resp.text());
       return null;
     }
+
     const data = await resp.json();
     return data?.items?.[0]?.id || null;
   } catch (e) {
-    console.error('findSubscriberByEmail error:', e);
+    console.error('findSubscriberByTelegramId error:', e);
     return null;
   }
 }
 
-/* ===== Поставить/снять тег ===== */
+// ─── BotHelp: поставить/снять тег ────────────────────────────────────────────
 async function setBothelpTag({ subscriberId, tag, action }) {
   if (!subscriberId) return;
+
   try {
     const token = await getBothelpToken();
     const url =
@@ -100,24 +107,25 @@ async function setBothelpTag({ subscriberId, tag, action }) {
     if (!resp.ok) {
       console.error('BotHelp tag error:', action, resp.status, await resp.text());
     } else {
-      console.log(`✅ BotHelp tag ${action} OK:`, subscriberId, tag);
+      console.log(`BotHelp tag ${action} OK:`, subscriberId, tag);
     }
   } catch (e) {
     console.error('setBothelpTag failed:', e);
   }
 }
 
-/* ================ Server ================ */
+// ─── Express server ──────────────────────────────────────────────────────────
 const app = express();
 
-// raw body только на /webhook (для проверки подписи Stripe)
+// Stripe хочет «сырой» body ровно на /webhook (для подписи)
 app.use('/webhook', bodyParser.raw({ type: 'application/json' }));
-// JSON для остальных маршрутов
+// а на остальные роуты обычный JSON
 app.use(bodyParser.json());
 
+app.get('/', (_req, res) => res.status(200).send('Stripe ↔ BotHelp proxy is up'));
 app.get('/health', (_req, res) => res.status(200).send('OK'));
 
-/* ===== Stripe webhook ===== */
+// ─── Stripe webhook handler ──────────────────────────────────────────────────
 app.post('/webhook', async (req, res) => {
   let event;
   try {
@@ -134,33 +142,61 @@ app.post('/webhook', async (req, res) => {
     switch (event.type) {
       case 'checkout.session.completed': {
         const s = event.data.object;
-        const email = s?.customer_details?.email || s?.customer_email || null;
-        console.log('checkout.session.completed email =', email);
 
-        const subId = await findSubscriberByEmail(email);
-        if (subId) await setBothelpTag({ subscriberId: subId, tag: BOTHELP_TAG, action: 'add' });
-        else console.warn('BotHelp subscriber not found by email:', email);
+        // КЛЮЧЕВОЕ: достаём Telegram ID
+        const tgId =
+          s?.client_reference_id ||                 // что мы передаём в ссылке checkout
+          s?.metadata?.telegram_id || null;         // на всякий случай дублируем в metadata
+
+        console.log('checkout.session.completed tgId=', tgId);
+
+        if (tgId) {
+          const subId = await findSubscriberByTelegramId(tgId);
+          if (subId) {
+            await setBothelpTag({ subscriberId: subId, tag: BOTHELP_TAG, action: 'add' });
+          } else {
+            console.warn('BotHelp subscriber not found by tgId:', tgId);
+          }
+        } else {
+          console.warn('No client_reference_id / telegram_id in session');
+        }
         break;
       }
 
       case 'invoice.payment_succeeded': {
         const inv = event.data.object;
-        const email = inv?.customer_email || inv?.customer_details?.email || null;
-        console.log('invoice.payment_succeeded email =', email);
+        const tgId =
+          inv?.client_reference_id ||
+          inv?.metadata?.telegram_id ||
+          inv?.lines?.data?.[0]?.price?.metadata?.telegram_id || null;
 
-        const subId = await findSubscriberByEmail(email);
-        if (subId) await setBothelpTag({ subscriberId: subId, tag: BOTHELP_TAG, action: 'add' });
+        console.log('invoice.payment_succeeded tgId=', tgId);
+
+        if (tgId) {
+          const subId = await findSubscriberByTelegramId(tgId);
+          if (subId) {
+            await setBothelpTag({ subscriberId: subId, tag: BOTHELP_TAG, action: 'add' });
+          }
+        }
         break;
       }
 
       case 'invoice.payment_failed':
       case 'customer.subscription.deleted': {
         const obj = event.data.object;
-        const email = obj?.customer_email || obj?.customer_details?.email || null;
-        console.log(`${event.type} email =`, email);
+        const tgId =
+          obj?.client_reference_id ||
+          obj?.metadata?.telegram_id ||
+          obj?.lines?.data?.[0]?.price?.metadata?.telegram_id || null;
 
-        const subId = await findSubscriberByEmail(email);
-        if (subId) await setBothelpTag({ subscriberId: subId, tag: BOTHELP_TAG, action: 'remove' });
+        console.log(`${event.type} tgId=`, tgId);
+
+        if (tgId) {
+          const subId = await findSubscriberByTelegramId(tgId);
+          if (subId) {
+            await setBothelpTag({ subscriberId: subId, tag: BOTHELP_TAG, action: 'remove' });
+          }
+        }
         break;
       }
 
@@ -169,16 +205,28 @@ app.post('/webhook', async (req, res) => {
         break;
 
       default:
+        // Другие события можно просто логировать
         console.log('Unhandled event:', event.type);
     }
   } catch (e) {
-    // не ломаем ответ Stripe — просто логируем
+    // Никогда не ломаем ответ Stripe — логируем и продолжаем
     console.error('Handler error:', e);
+  }
+
+  // (опционально) форвардим сырой event в ваш старый BotHelp webhook
+  if (BOTHELP_WEBHOOK_URL) {
+    fetch(BOTHELP_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(event)
+    })
+      .then(r => console.log('→ Forwarded to BotHelp webhook:', r.status))
+      .catch(e => console.error('→ BotHelp forward error:', e));
   }
 
   res.json({ received: true });
 });
 
-/* ===== Run ===== */
-const port = process.env.PORT || 10000; // Render пробрасывает порт в PORT
+// ─── run ─────────────────────────────────────────────────────────────────────
+const port = process.env.PORT || 3000; // Render сам пробрасывает PORT
 app.listen(port, () => console.log(`Server listening on ${port}`));
