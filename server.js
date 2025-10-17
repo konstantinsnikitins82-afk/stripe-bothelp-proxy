@@ -60,30 +60,35 @@ async function getBothelpToken() {
   return bothelpToken;
 }
 
-// Поиск подписчика по email (для Payment Links это самый простой матч)
+// Поиск подписчика по email
 async function findSubscriberByEmail(email) {
-  if (!email) return null;
   try {
     const token = await getBothelpToken();
-    const url = `${BOTHELP_API_BASE}/openapi/subscribers/search`;
-    const resp = await fetch(url, {
+    const resp = await fetch(`${BOTHELP_API_BASE}/openapi/v1/subscribers/search`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json'
+        'Content-Type': 'application/json'
       },
       body: JSON.stringify({ email })
     });
-    if (!resp.ok) {
-      const txt = await resp.text();
-      console.error('❌ BotHelp search error:', resp.status, txt);
+
+    const text = await resp.text();
+    let data;
+
+    try {
+      data = JSON.parse(text);
+    } catch {
+      console.error('❌ BotHelp API returned non-JSON response:', text.slice(0, 200));
       return null;
     }
-    const data = await resp.json();
-    const id = data?.items?.[0]?.id || null;
-    if (!id) console.warn('⚠️ BotHelp subscriber not found by email:', email);
-    return id;
+
+    if (!resp.ok) {
+      console.error('BotHelp search error:', resp.status, data);
+      return null;
+    }
+
+    return data?.items?.[0]?.id || null;
   } catch (e) {
     console.error('findSubscriberByEmail error', e);
     return null;
