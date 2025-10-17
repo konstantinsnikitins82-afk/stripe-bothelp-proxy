@@ -1,28 +1,20 @@
-// server.js  (CommonJS)
+// server.js
 
 const express = require('express');
 const bodyParser = require('body-parser');
 const Stripe = require('stripe');
 
-// ========= ENV =========
 const STRIPE_SECRET_KEY      = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WEBHOOK_SECRET  = process.env.STRIPE_WEBHOOK_SECRET;
 
-// ВАЖНО: именно https://api.bothelp.io (без пробелов/слэшей)
 const BOTHELP_API_BASE       = (process.env.BOTHELP_API_BASE || ' https://api.bothelp.io').trim();
 const BOTHELP_CLIENT_ID      = process.env.BOTHELP_CLIENT_ID;
 const BOTHELP_CLIENT_SECRET  = process.env.BOTHELP_CLIENT_SECRET;
-
-// Тег, который ставим активным подписчикам
 const BOTHELP_TAG            = (process.env.BOTHELP_TAG || 'sub_active').trim();
-
-// (необязательно) старый вебхук BotHelp — можем оставить на будущее
 const BOTHELP_WEBHOOK_URL    = process.env.BOTHELP_WEBHOOK_URL || null;
 
-// ========= Stripe ========
 const stripe = new Stripe(STRIPE_SECRET_KEY);
 
-// ========= BotHelp OAuth2 (client_credentials) =========
 let bothelpToken = null;
 let bothelpTokenExp = 0;
 
@@ -31,9 +23,9 @@ async function getBothelpToken() {
   if (bothelpToken && now < bothelpTokenExp - 60000) return bothelpToken;
 
   const params = new URLSearchParams();
-  params.append('client_id',     BOTHELP_CLIENT_ID);
+  params.append('client_id', BOTHELP_CLIENT_ID);
   params.append('client_secret', BOTHELP_CLIENT_SECRET);
-  params.append('grant_type',    'client_credentials');
+  params.append('grant_type', 'client_credentials');
 
   const url = `${BOTHELP_API_BASE}/openapi/oauth/token`;
   console.log('[BotHelp] requesting token:', url);
@@ -63,7 +55,6 @@ async function getBothelpToken() {
   return bothelpToken;
 }
 
-// Поиск подписчика по email (OpenAPI v1)
 async function findSubscriberByEmail(email) {
   try {
     const token = await getBothelpToken();
@@ -101,7 +92,6 @@ async function findSubscriberByEmail(email) {
   }
 }
 
-// Поставить/снять тег
 async function setBothelpTag({ subscriberId, tag, action }) {
   try {
     const token = await getBothelpToken();
@@ -131,18 +121,12 @@ async function setBothelpTag({ subscriberId, tag, action }) {
   }
 }
 
-// ========= Server =========
 const app = express();
-
-// raw body ТОЛЬКО на /webhook (для проверки подписи Stripe)
 app.use('/webhook', bodyParser.raw({ type: 'application/json' }));
-// обычный json на всё остальное
 app.use(bodyParser.json());
 
-// healthcheck
 app.get('/health', (_req, res) => res.status(200).send('OK'));
 
-// Stripe webhook
 app.post('/webhook', async (req, res) => {
   let event;
   try {
@@ -217,11 +201,8 @@ app.post('/webhook', async (req, res) => {
   res.json({ received: true });
 });
 
-// run
-const port = process.env.PORT || 3000; // Render перебиндит на свой порт — это нормально
+const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Server listening on ${port}`));
-});
 
-// run
 const port = process.env.PORT || 3000; // Render перебиндит на свой порт — это нормально
 app.listen(port, () => console.log(`Server listening on ${port}`));
