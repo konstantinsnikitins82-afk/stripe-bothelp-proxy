@@ -35,7 +35,7 @@ async function getBothelpToken() {
   params.append('client_secret', BOTHELP_CLIENT_SECRET);
   params.append('grant_type', 'client_credentials');
 
-  const resp = await fetch(`${BOTHELP_API_BASE}/oauth/token`, {
+  const resp = await fetch(`${BOTHELP_API_BASE}/openapi/oauth/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: params
