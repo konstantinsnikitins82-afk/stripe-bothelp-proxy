@@ -1,282 +1,187 @@
-// server.js — Costa Online Fit Club
-// Stripe ↔ BotHelp интеграция с привязкой по Telegram ID + редирект на 6 языков
+// server.js
+import express from "express";
+import bodyParser from "body-parser";
+import Stripe from "stripe";
+import fetch from "node-fetch";
 
-import express from 'express';
-import bodyParser from 'body-parser';
-import Stripe from 'stripe';
-import fetch from 'node-fetch';
+// ======== ENV ========
+const STRIPE_SECRET_KEY      = process.env.STRIPE_SECRET_KEY;
+const STRIPE_WEBHOOK_SECRET  = process.env.STRIPE_WEBHOOK_SECRET;
 
-// ───────────────────────── ENV ─────────────────────────
-// Stripe
-const STRIPE_SECRET_KEY     = process.env.STRIPE_SECRET_KEY;
-const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
+// BotHelp OpenAPI (по желанию — можно оставить пустым, код ниже не ломается)
+const BOTHELP_API_BASE       = (process.env.BOTHELP_API_BASE || "https://openapi.bothelp.io").trim();
+const BOTHELP_CLIENT_ID      = process.env.BOTHELP_CLIENT_ID || "";
+const BOTHELP_CLIENT_SECRET  = process.env.BOTHELP_CLIENT_SECRET || "";
+const BOTHELP_TAG            = process.env.BOTHELP_TAG || "sub_active";
+const BOTHELP_WEBHOOK_URL    = process.env.BOTHELP_WEBHOOK_URL || "";
 
-// BotHelp OpenAPI
-const BOTHELP_API_BASE      = (process.env.BOTHELP_API_BASE || ' https://openapi.bothelp.io').trim(); // без хвостов
-const BOTHELP_CLIENT_ID     = process.env.BOTHELP_CLIENT_ID;
-const BOTHELP_CLIENT_SECRET = process.env.BOTHELP_CLIENT_SECRET;
-const BOTHELP_TAG           = process.env.BOTHELP_TAG || 'sub_active';
+// ======== Stripe ========
+const stripe = new Stripe(STRIPE_SECRET_KEY);
 
-// (опционально) старый форвард вебхука
-const BOTHELP_WEBHOOK_URL   = process.env.BOTHELP_WEBHOOK_URL || null;
-
-// Payment Links по языкам (обязательно задайте в Render → Environment)
-const LINKS = {
-  it: process.env.IT_LINK, // https://buy.stripe.com/...
-  en: process.env.EN_LINK,
-  ru: process.env.RU_LINK,
-  es: process.env.ES_LINK,
-  fr: process.env.FR_LINK,
-  lv: process.env.LV_LINK,
+// ======== Мэппинг языков → Payment Link (buy.stripe.com/XXXX) ========
+// ВПИШИ свои коды ссылок (то, что идёт после buy.stripe.com/)
+const PAYMENT_LINKS = {
+  en: "9B66oG0u4df0AfkcqMw03",   // пример! замени на свой
+  ru: "7sY4gY18eejXmaxXWgMW01",  // пример! замени на свой
+  it: "abcdef1234567890abcd01",  // пример! замени на свой
+  es: "abcdef1234567890abcd02",
+  fr: "abcdef1234567890abcd03",
+  lv: "abcdef1234567890abcd04",
 };
 
-// ───────────────────────── INIT ────────────────────────
-if (!STRIPE_SECRET_KEY)     console.warn('⚠️  STRIPE_SECRET_KEY is not set');
-if (!STRIPE_WEBHOOK_SECRET) console.warn('⚠️  STRIPE_WEBHOOK_SECRET is not set');
-if (!BOTHELP_CLIENT_ID || !BOTHELP_CLIENT_SECRET) console.warn('⚠️  BOTHELP CLIENT credentials are not set');
+// Соответствие языка локали чекаута Stripe (опционально)
+const LOCALE = {
+  en: "en",
+  ru: "ru",
+  it: "it",
+  es: "es",
+  fr: "fr",
+  lv: "lv",
+};
 
-const stripe = new Stripe(STRIPE_SECRET_KEY);
-const app = express();
-
-// Stripe требует raw body ровно на /webhook
-app.use('/webhook', bodyParser.raw({ type: 'application/json' }));
-// остальное — обычный JSON
-app.use(bodyParser.json());
-
-// ─────────────────── BotHelp OAuth2 token ──────────────────
+// ======== BotHelp OAuth2 (опционально, для дальнейшей автотеговки) ========
 let bothelpToken = null;
 let bothelpTokenExp = 0;
 
 async function getBothelpToken() {
+  if (!BOTHELP_CLIENT_ID || !BOTHELP_CLIENT_SECRET) return null; // можно работать без BotHelp API
   const now = Date.now();
   if (bothelpToken && now < bothelpTokenExp - 60_000) return bothelpToken;
 
-  const form = new URLSearchParams();
-  form.append('client_id', BOTHELP_CLIENT_ID);
-  form.append('client_secret', BOTHELP_CLIENT_SECRET);
-  form.append('grant_type', 'client_credentials');
+  const params = new URLSearchParams();
+  params.append("client_id", BOTHELP_CLIENT_ID);
+  params.append("client_secret", BOTHELP_CLIENT_SECRET);
+  params.append("grant_type", "client_credentials");
 
-  const resp = await fetch(`${BOTHELP_API_BASE}/oauth/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: form
+  const resp = await fetch(`${BOTHELP_API_BASE}/openapi/oauth/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: params,
   });
 
   if (!resp.ok) {
-    const t = await resp.text().catch(() => '');
-    console.error('BotHelp token error:', resp.status, t);
-    throw new Error('Cannot get BotHelp token');
+    console.error("BotHelp token error:", resp.status, await resp.text());
+    return null;
   }
 
   const data = await resp.json();
   bothelpToken = data.access_token;
   bothelpTokenExp = Date.now() + (data.expires_in || 3600) * 1000;
+  console.log("✅ BotHelp token OK");
   return bothelpToken;
 }
 
-// ───────────── BotHelp helpers (поиск/теги по tgId) ─────────────
-async function findSubscriberByTelegramId(tgId) {
-  if (!tgId) return null;
+// ======== Express ========
+const app = express();
+
+// raw body только на /webhook
+app.use("/webhook", bodyParser.raw({ type: "application/json" }));
+// обычный json для остальных роутов
+app.use(bodyParser.json());
+
+// Healthcheck
+app.get("/health", (_req, res) => res.status(200).send("OK"));
+
+// ---------- PAY: редирект на Stripe Payment Link с tg_id ----------
+app.get("/pay/:lang", async (req, res) => {
   try {
-    const token = await getBothelpToken();
-    const resp = await fetch(`${BOTHELP_API_BASE}/subscribers/search`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ telegram_id: String(tgId) })
-    });
-    if (!resp.ok) {
-      const t = await resp.text().catch(() => '');
-      console.error('BotHelp search error:', resp.status, t);
-      return null;
+    const lang = (req.params.lang || "en").toLowerCase();
+    const tgId = (req.query.tg_id || "").toString().trim();
+
+    const code = PAYMENT_LINKS[lang];
+    if (!code) {
+      return res.status(400).send(`Unknown language: ${lang}`);
     }
-    const data = await resp.json();
-    return data?.items?.[0]?.id || null;
+
+    // базовая ссылка Payment Link
+    const base = `https://buy.stripe.com/${code}`;
+
+    // добавляем client_reference_id (сюда кладём tg_id) и локаль
+    const params = new URLSearchParams();
+    if (tgId) params.append("client_reference_id", tgId);
+    const locale = LOCALE[lang];
+    if (locale) params.append("locale", locale);
+
+    const url = params.toString() ? `${base}?${params.toString()}` : base;
+
+    console.log("→ /pay:", { lang, tgId, redirect: url });
+    return res.redirect(302, url);
   } catch (e) {
-    console.error('findSubscriberByTelegramId error:', e);
-    return null;
+    console.error("PAY error:", e);
+    return res.status(500).send("PAY error");
   }
-}
-
-async function setBothelpTag({ subscriberId, tag, action }) {
-  if (!subscriberId) return;
-  try {
-    const token = await getBothelpToken();
-    const url =
-      action === 'add'
-        ? `${BOTHELP_API_BASE}/subscribers/tags/add`
-        : `${BOTHELP_API_BASE}/subscribers/tags/remove`;
-
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ subscriber_id: subscriberId, tag })
-    });
-
-    if (!resp.ok) {
-      const t = await resp.text().catch(() => '');
-      console.error('BotHelp tag error:', action, resp.status, t);
-    } else {
-      console.log(`✅ BotHelp tag ${action} OK:`, subscriberId, tag);
-    }
-  } catch (e) {
-    console.error('setBothelpTag failed:', e);
-  }
-}
-
-// ──────────────────── Утилита: достать tgId ───────────────────
-async function getTgFromObject(obj) {
-  // 1) Прямые места
-  const direct =
-    obj?.client_reference_id ||
-    obj?.metadata?.telegram_id ||
-    obj?.lines?.data?.[0]?.price?.metadata?.telegram_id ||
-    null;
-  if (direct) return String(direct);
-
-  // 2) Из Customer.metadata (после того как мы сохраним туда tgId в checkout.session.completed)
-  const customerId = obj?.customer || obj?.customer_id || null;
-  if (customerId) {
-    try {
-      const customer = await stripe.customers.retrieve(customerId);
-      return customer?.metadata?.telegram_id || null;
-    } catch (e) {
-      console.error('getTgFromObject: fetch customer failed', e);
-    }
-  }
-  return null;
-}
-
-// ─────────────────────── Health ────────────────────────
-app.get('/', (_req, res) => res.status(200).send('Stripe ↔ BotHelp proxy is up'));
-app.get('/health', (_req, res) => res.status(200).send('OK'));
-
-// ─────────────── Редирект на Stripe (6 языков) ───────────────
-app.get('/pay/:lang', (req, res) => {
-  const { lang } = req.params; // it|en|ru|es|fr|lv
-  const { tg_id } = req.query;
-  const base = LINKS[lang];
-
-  if (!base)  return res.status(400).send('Unknown language');
-  if (!tg_id) return res.status(400).send('tg_id required');
-
-  const url = `${base}?client_reference_id=${encodeURIComponent(tg_id)}&locale=${encodeURIComponent(lang)}`;
-  return res.redirect(302, url);
 });
 
-// ───────────────────── Stripe Webhook ─────────────────────
-app.post('/webhook', async (req, res) => {
+// ---------- STRIPE WEBHOOK ----------
+app.post("/webhook", async (req, res) => {
   let event;
   try {
-    const sig = req.headers['stripe-signature'];
+    const sig = req.headers["stripe-signature"];
     event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
   } catch (err) {
-    console.error('❌ Signature verification failed:', err.message);
+    console.error("❌ Stripe signature verify failed:", err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  console.log('➡️  Stripe event:', event.type);
+  console.log("➡️ Stripe event:", event.type);
 
   try {
     switch (event.type) {
-      case 'checkout.session.completed': {
+      case "checkout.session.completed": {
         const s = event.data.object;
-
-        const tgId =
-          s?.client_reference_id ||
-          s?.metadata?.telegram_id ||
+        const tgId = s.client_reference_id || null; // вот тут получаем то, что передали из /pay
+        const email =
+          s?.customer_details?.email ||
+          s?.customer_email ||
           null;
 
-        console.log('checkout.session.completed tgId=', tgId);
+        console.log("checkout.session.completed:", { tgId, email });
 
-        // Сохраняем tgId в Customer.metadata (важно для дальнейших событий)
-        try {
-          if (tgId && s?.customer) {
-            await stripe.customers.update(s.customer, {
-              metadata: { telegram_id: String(tgId) }
-            });
-            console.log('Saved telegram_id to customer metadata');
-          }
-        } catch (e) {
-          console.error('Failed to save tg to customer:', e);
-        }
-
-        // Ставим тег доступа в BotHelp
-        if (tgId) {
-          const subId = await findSubscriberByTelegramId(tgId);
-          if (subId) {
-            await setBothelpTag({ subscriberId: subId, tag: BOTHELP_TAG, action: 'add' });
-          } else {
-            console.warn('BotHelp subscriber not found by tgId:', tgId);
-          }
-        } else {
-          console.warn('No client_reference_id / telegram_id in session');
-        }
+        // здесь можно дернуть BotHelp по tgId (если у тебя в BotHelp есть кастомное поле)
+        // или по email (если это уже налажено). Я оставляю лог, чтобы не ломать.
         break;
       }
 
-      case 'invoice.payment_succeeded': {
-        // Можно продублировать "add" (если нужно подтверждать продления)
+      case "invoice.payment_succeeded": {
         const inv = event.data.object;
-        const tgId = await getTgFromObject(inv);
-        console.log('invoice.payment_succeeded tgId=', tgId);
-        if (tgId) {
-          const subId = await findSubscriberByTelegramId(tgId);
-          if (subId) {
-            await setBothelpTag({ subscriberId: subId, tag: BOTHELP_TAG, action: 'add' });
-          }
-        }
+        // tgId в инвойсе чаще всего нет — он на сессии. Можно поднять из metadata, если будешь класть.
+        const email = inv?.customer_email || inv?.customer_details?.email || null;
+        console.log("invoice.payment_succeeded:", { email });
         break;
       }
 
-      case 'invoice.payment_failed':
-      case 'customer.subscription.deleted': {
-        // Удаляем доступ при неуспехе/отписке
+      case "invoice.payment_failed":
+      case "customer.subscription.deleted": {
         const obj = event.data.object;
-        const tgId = await getTgFromObject(obj);
-        console.log(`${event.type} tgId=`, tgId);
-        if (tgId) {
-          const subId = await findSubscriberByTelegramId(tgId);
-          if (subId) {
-            await setBothelpTag({ subscriberId: subId, tag: BOTHELP_TAG, action: 'remove' });
-          }
-        }
+        const email = obj?.customer_email || obj?.customer_details?.email || null;
+        console.log(`${event.type}:`, { email });
         break;
       }
-
-      case 'customer.subscription.trial_will_end':
-        console.log('Trial will end soon');
-        break;
 
       default:
-        // прочие события просто логируем
-        console.log('Unhandled event:', event.type);
+        // просто логируем остальные
+        break;
     }
   } catch (e) {
-    // Никогда не роняем ответ Stripe — логируем и продолжаем
-    console.error('Handler error:', e);
+    console.error("Webhook handler error:", e);
   }
 
-  // (опционально) форвард сырого события в дополнительный webhook
+  // (опционально) пробрасываем весь ивент в старый вебхук BotHelp
   if (BOTHELP_WEBHOOK_URL) {
     fetch(BOTHELP_WEBHOOK_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(event)
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(event),
     })
-      .then(r => console.log('→ Forwarded to BotHelp webhook:', r.status))
-      .catch(e => console.error('→ BotHelp forward error:', e));
+      .then(r => console.log("→ forwarded to BotHelp webhook:", r.status))
+      .catch(e => console.error("→ BotHelp forward error:", e));
   }
 
   res.json({ received: true });
 });
 
-// ───────────────────── run ─────────────────────
-const port = process.env.PORT || 3000; // Render сам задаёт PORT
-app.listen(port, () => console.log(`Server listening on ${port}`));
-
+// ---------- RUN ----------
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`Server listening on ${port}`);
+});
